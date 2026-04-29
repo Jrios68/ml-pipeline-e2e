@@ -1,5 +1,5 @@
 # Pipeline ML End-to-End con MLOps
-
+https://github.com/Jrios68/ml-pipeline-e2e
 ## 1. Descripción del proyecto
 
 Este proyecto implementa un pipeline de Machine Learning End-to-End para demostrar el valor de la analítica en una organización, aplicando principios de MLOps como reproducibilidad, automatización, trazabilidad, versionado de modelos, monitoreo y preparación para producción.
