@@ -22,7 +22,12 @@ import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
 
 
-ID_COLS = ["p_codmes", "key_value"]
+# Columnas que no deben entrar al entrenamiento del modelo.
+# p_codmes: columna temporal usada para split.
+# key_value: identificador del cliente.
+# source_file: archivo de origen, usado solo para trazabilidad.
+ID_COLS = ["p_codmes", "key_value", "source_file"]
+
 TARGET_COL = "target"
 MODEL_DIR = Path("models")
 
@@ -34,30 +39,38 @@ def prepare_features(df: pd.DataFrame, feature_names: List[str] = None) -> pd.Da
     Si feature_names se informa, alinea el DataFrame a esas columnas.
     """
     drop_cols = [col for col in ID_COLS + [TARGET_COL] if col in df.columns]
+
     X = df.drop(columns=drop_cols)
 
     if feature_names is not None:
         for col in feature_names:
             if col not in X.columns:
                 X[col] = 0
+
         X = X[feature_names]
 
     return X
 
 
 def _xy(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    """Separa variables predictoras y variable objetivo."""
+    """
+    Separa variables predictoras y variable objetivo.
+    """
     X = prepare_features(df)
     y = df[TARGET_COL]
 
     if y.nunique() < 2:
-        raise ValueError("La variable target debe tener al menos dos clases para entrenar.")
+        raise ValueError(
+            "La variable target debe tener al menos dos clases para entrenar."
+        )
 
     return X, y
 
 
 def _classification_metrics(y_true, scores, threshold: float = 0.5) -> dict:
-    """Calcula métricas principales de clasificación."""
+    """
+    Calcula métricas principales de clasificación.
+    """
     y_pred = (scores >= threshold).astype(int)
 
     return {
@@ -108,6 +121,7 @@ def train_and_log(
     scale_pos_weight = 1.0
     positives = y_train.sum()
     negatives = len(y_train) - positives
+
     if positives > 0:
         scale_pos_weight = negatives / positives
 
@@ -115,7 +129,9 @@ def train_and_log(
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 50, 400),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "learning_rate": trial.suggest_float(
+                "learning_rate", 1e-3, 0.3, log=True
+            ),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
@@ -128,9 +144,16 @@ def train_and_log(
         }
 
         model = xgb.XGBClassifier(**params)
-        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=[(X_test, y_test)],
+            verbose=False,
+        )
 
         scores = model.predict_proba(X_test)[:, 1]
+
         return roc_auc_score(y_test, scores)
 
     study = optuna.create_study(direction="maximize")
@@ -157,14 +180,17 @@ def train_and_log(
 
     with mlflow.start_run() as run:
         mlflow.log_params(best_params)
+
         mlflow.log_metric("test.auc", test_metrics["auc"])
         mlflow.log_metric("test.accuracy", test_metrics["accuracy"])
         mlflow.log_metric("test.precision", test_metrics["precision"])
         mlflow.log_metric("test.recall", test_metrics["recall"])
+
         mlflow.log_metric("val.auc", val_metrics["auc"])
         mlflow.log_metric("val.accuracy", val_metrics["accuracy"])
         mlflow.log_metric("val.precision", val_metrics["precision"])
         mlflow.log_metric("val.recall", val_metrics["recall"])
+
         mlflow.log_metric("optuna.best_value", float(study.best_value))
 
         mlflow.xgboost.log_model(
