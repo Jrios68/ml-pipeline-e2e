@@ -21,7 +21,7 @@ from monitoring import run_monitoring, compute_recall_by_decile
 from postprocessing import run_postprocessing, save_replica
 
 
-DEFAULT_INPUT_PATH = "data/raw/Data_CU_venta.csv"
+DEFAULT_INPUT_PATH = "data/raw"
 DEFAULT_OUTPUT_DIR = "data/processed"
 DEFAULT_POST_PATH = "data/postprocessed/output_tlv.csv"
 DEFAULT_MONITORING_DIR = "data/monitoring"

@@ -107,6 +107,117 @@ def _impute_and_encode(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
 
     return df, metadata
 
+def load_dataset(data_path: str) -> pd.DataFrame:
+    """
+    Carga uno o varios archivos CSV.
+
+    Casos soportados:
+    1. Si data_path es un archivo CSV, lo lee directamente.
+    2. Si data_path es una carpeta, busca archivos p*_extrac.csv,
+       los ordena correctamente de p1 a p10, los lee y los concatena
+       en un único DataFrame.
+
+    Args:
+        data_path: Ruta de un archivo CSV o carpeta con varios CSV.
+
+    Returns:
+        DataFrame consolidado.
+    """
+    path = Path(data_path)
+
+    if path.is_file():
+        print(f"Leyendo archivo único: {path}")
+        return pd.read_csv(path)
+
+    if path.is_dir():
+        files = sorted(
+            path.glob("p*_extrac.csv"),
+            key=lambda file: int(file.stem.replace("p", "").replace("_extrac", ""))
+        )
+
+        if not files:
+            raise FileNotFoundError(
+                f"No se encontraron archivos p*_extrac.csv en la carpeta: {path}"
+            )
+
+        dfs = []
+
+        for file in files:
+            print(f"Leyendo archivo: {file.name}")
+            df_part = pd.read_csv(file)
+            df_part["source_file"] = file.name
+            dfs.append(df_part)
+
+        df = pd.concat(dfs, ignore_index=True)
+
+        print(f"Archivos leídos: {len(files)}")
+        print(f"Filas totales consolidadas: {len(df):,}")
+
+        return df
+
+    raise FileNotFoundError(f"No existe la ruta indicada: {data_path}")
+
+def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Estandariza nombres de columnas para que el pipeline use una nomenclatura común.
+
+    El pipeline trabaja internamente con:
+    - p_codmes
+    - tipdoc
+
+    En la data real:
+    - El periodo puede venir en partition o p_fecinformacion.
+    - El tipo de documento puede venir como tip_doc.
+    """
+    df = df.copy()
+
+    if "tipdoc" not in df.columns and "tip_doc" in df.columns:
+        df = df.rename(columns={"tip_doc": "tipdoc"})
+
+    # Crear p_codmes usando primero partition.
+    if "partition" in df.columns:
+        codmes_partition = _extract_codmes(df["partition"])
+    else:
+        codmes_partition = pd.Series([pd.NA] * len(df), index=df.index)
+
+    # Crear p_codmes usando p_fecinformacion como respaldo.
+    if "p_fecinformacion" in df.columns:
+        codmes_fecha = _extract_codmes(df["p_fecinformacion"])
+    else:
+        codmes_fecha = pd.Series([pd.NA] * len(df), index=df.index)
+
+    # Usar partition cuando sirva; si no, usar p_fecinformacion.
+    df["p_codmes"] = codmes_partition.fillna(codmes_fecha)
+
+    return df
+
+def _extract_codmes(series: pd.Series) -> pd.Series:
+    """
+    Extrae un codmes numérico YYYYMM desde distintos formatos posibles:
+    - 202412
+    - 20241231
+    - 2024-12-01
+    - 2024/12/01
+    - 2024-12
+    - partition=202412
+    """
+    text = series.astype(str).str.strip()
+
+    # Primero intenta convertir como fecha.
+    fechas = pd.to_datetime(text, errors="coerce", dayfirst=False)
+    codmes_fecha = fechas.dt.year * 100 + fechas.dt.month
+
+    # Luego intenta extraer dígitos.
+    digits = text.str.replace(r"\D", "", regex=True)
+
+    # Busca un patrón YYYYMM.
+    codmes_texto = digits.str.extract(r"((?:19|20)\d{4})")[0]
+    codmes_texto = pd.to_numeric(codmes_texto, errors="coerce")
+
+    # Usar fecha si funciona; si no, usar texto.
+    codmes = codmes_fecha.fillna(codmes_texto)
+
+    return pd.to_numeric(codmes, errors="coerce")
 
 def run_preprocessing(
     data_path: str,
@@ -120,7 +231,7 @@ def run_preprocessing(
     Ejecuta el pipeline completo de preprocesamiento.
 
     Args:
-        data_path: Ruta del archivo CSV de entrada.
+        data_path: Ruta del archivo CSV de entrada o carpeta con varios CSV.
         output_dir: Carpeta de salida para los archivos procesados.
         nan_threshold: Porcentaje máximo permitido de nulos por columna.
         validation_codmes: Mes que se reservará para validación.
@@ -134,25 +245,41 @@ def run_preprocessing(
     output_path.mkdir(parents=True, exist_ok=True)
 
     data_path = Path(data_path)
+
     if not data_path.exists():
         raise FileNotFoundError(
-            f"No se encontró el archivo de entrada: {data_path}. "
-            "Coloca el dataset en data/raw/Data_CU_venta.csv o usa --input."
+            f"No se encontró la ruta de entrada: {data_path}. "
+            "Coloca los archivos p1_extrac.csv, p2_extrac.csv, ..., p10_extrac.csv "
+            "en data/raw/ o usa --input con la ruta correcta."
         )
 
-    df = pd.read_csv(data_path)
+    # Cargar dataset: archivo único o múltiples archivos CSV en carpeta.
+    df = load_dataset(data_path)
+
+    # Estandarizar nombres de columnas según la data real.
+    df = _standardize_columns(df)
+
+    #Validar columnas mínimas.
     _validate_required_columns(df)
 
-    # Normalizar p_codmes como numérico si es posible.
+    # Normalizar p_codmes como YYYYMM numérico.
     df[DATE_COL] = pd.to_numeric(df[DATE_COL], errors="coerce")
+
+    print("Valores válidos de p_codmes:", df[DATE_COL].notna().sum())
+    print("Ejemplos de p_codmes:", sorted(df[DATE_COL].dropna().unique())[:10])
+
+    # Eliminar registros sin p_codmes válido.
+    df = df.dropna(subset=[DATE_COL])
 
     # Eliminar columnas con exceso de nulos.
     cols_drop = [
         col for col in df.columns
         if df[col].isna().mean() * 100 > nan_threshold
     ]
+
     df = df.drop(columns=cols_drop)
 
+    # Seleccionar mes de validación.
     selected_val_codmes = _select_validation_month(df, validation_codmes)
 
     # Separación temporal.
@@ -160,16 +287,24 @@ def run_preprocessing(
     df_main_raw = df[df[DATE_COL] != selected_val_codmes].copy()
 
     if df_val_raw.empty:
-        raise ValueError("El set de validación quedó vacío.")
-    if df_main_raw.empty:
-        raise ValueError("El set de entrenamiento/prueba quedó vacío.")
+        raise ValueError(
+            f"El set de validación quedó vacío para p_codmes={selected_val_codmes}."
+        )
 
-    # Imputar y codificar todo el dataset de forma simple para mantener consistencia.
+    if df_main_raw.empty:
+        raise ValueError(
+            "El set de entrenamiento/prueba quedó vacío. "
+            "Verifica que existan meses diferentes al mes de validación."
+        )
+
+    # Imputar y codificar todo el dataset para mantener consistencia.
     df_processed, encoding_metadata = _impute_and_encode(df)
 
+    # Volver a separar después del encoding.
     df_val = df_processed[df_processed[DATE_COL] == selected_val_codmes].copy()
     df_main = df_processed[df_processed[DATE_COL] != selected_val_codmes].copy()
 
+    # Estratificar solo si target tiene dos clases.
     stratify = df_main[TARGET_COL] if df_main[TARGET_COL].nunique() == 2 else None
 
     df_train, df_test = train_test_split(
@@ -179,11 +314,13 @@ def run_preprocessing(
         stratify=stratify,
     )
 
+    # Guardar datasets procesados.
     df_train.to_csv(output_path / "df_train.csv", index=False)
     df_test.to_csv(output_path / "df_test.csv", index=False)
     df_val.to_csv(output_path / "df_val.csv", index=False)
 
     metadata = {
+        "input_path": str(data_path),
         "dropped_columns": cols_drop,
         "validation_codmes": float(selected_val_codmes),
         "n_rows_raw": int(len(df)),
